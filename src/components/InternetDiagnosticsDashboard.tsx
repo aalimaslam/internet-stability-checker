@@ -11,6 +11,12 @@ type Explanation = {
   value: string;
 };
 
+const MAX_HISTORY_SAMPLES = 60;
+const MIN_SESSION_DURATION_SECONDS = 15;
+const MAX_SESSION_DURATION_SECONDS = 3600;
+const MIN_SAMPLE_INTERVAL_SECONDS = 2;
+const MAX_SAMPLE_INTERVAL_SECONDS = 600;
+
 function metricCard(
   label: string,
   value: string | number | undefined,
@@ -93,6 +99,16 @@ function lineChart(
   );
 }
 
+function getSessionButtonLabel(isRunning: boolean, isSessionActive: boolean) {
+  if (isRunning && !isSessionActive) {
+    return "Preparing...";
+  }
+  if (isSessionActive) {
+    return "Session running";
+  }
+  return "Start timed test";
+}
+
 export function InternetDiagnosticsDashboard() {
   const [result, setResult] = useState<InternetDiagnosticsResult | null>(null);
   const [history, setHistory] = useState<InternetDiagnosticsResult[]>([]);
@@ -102,7 +118,7 @@ export function InternetDiagnosticsDashboard() {
   const [sampleIntervalSeconds, setSampleIntervalSeconds] = useState(10);
   const [sessionEndsAt, setSessionEndsAt] = useState<number | null>(null);
   const [nextSampleAt, setNextSampleAt] = useState<number | null>(null);
-  const [clock, setClock] = useState(Date.now());
+  const [clock, setClock] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const runningRef = useRef(false);
   const sessionActiveRef = useRef(false);
@@ -123,7 +139,10 @@ export function InternetDiagnosticsDashboard() {
     try {
       const output = await runInternetDiagnostics();
       setResult(output);
-      setHistory((current) => [...current.slice(-59), output]);
+      setHistory((current) => [
+        ...current.slice(-(MAX_HISTORY_SAMPLES - 1)),
+        output,
+      ]);
       return output;
     } catch (runError) {
       const message =
@@ -163,8 +182,33 @@ export function InternetDiagnosticsDashboard() {
     [clearTimers],
   );
 
-  const scheduleSample = useCallback(
-    (delayMs: number) => {
+  const startSession = useCallback(async () => {
+    const sanitizedDuration = Math.min(
+      Math.max(sessionDurationSeconds, MIN_SESSION_DURATION_SECONDS),
+      MAX_SESSION_DURATION_SECONDS,
+    );
+    const sanitizedInterval = Math.min(
+      Math.max(sampleIntervalSeconds, MIN_SAMPLE_INTERVAL_SECONDS),
+      MAX_SAMPLE_INTERVAL_SECONDS,
+    );
+
+    setSessionDurationSeconds(sanitizedDuration);
+    setSampleIntervalSeconds(sanitizedInterval);
+    setHistory([]);
+    setResult(null);
+    setError(null);
+
+    const now = Date.now();
+    const endAt = now + sanitizedDuration * 1000;
+    sessionEndRef.current = endAt;
+    sampleIntervalRef.current = sanitizedInterval;
+    sessionActiveRef.current = true;
+    setIsSessionActive(true);
+    setSessionEndsAt(endAt);
+
+    await runCheck();
+
+    const scheduleSample = (delayMs: number) => {
       sampleTimerRef.current = setTimeout(async () => {
         if (!sessionActiveRef.current) {
           return;
@@ -185,29 +229,7 @@ export function InternetDiagnosticsDashboard() {
 
         setNextSampleAt(null);
       }, delayMs);
-    },
-    [runCheck],
-  );
-
-  const startSession = useCallback(async () => {
-    const sanitizedDuration = Math.min(Math.max(sessionDurationSeconds, 15), 3600);
-    const sanitizedInterval = Math.min(Math.max(sampleIntervalSeconds, 2), 600);
-
-    setSessionDurationSeconds(sanitizedDuration);
-    setSampleIntervalSeconds(sanitizedInterval);
-    setHistory([]);
-    setResult(null);
-    setError(null);
-
-    const now = Date.now();
-    const endAt = now + sanitizedDuration * 1000;
-    sessionEndRef.current = endAt;
-    sampleIntervalRef.current = sanitizedInterval;
-    sessionActiveRef.current = true;
-    setIsSessionActive(true);
-    setSessionEndsAt(endAt);
-
-    await runCheck();
+    };
 
     const nextAt = Date.now() + sanitizedInterval * 1000;
     if (nextAt < endAt) {
@@ -221,7 +243,6 @@ export function InternetDiagnosticsDashboard() {
   }, [
     runCheck,
     sampleIntervalSeconds,
-    scheduleSample,
     sessionDurationSeconds,
     stopSession,
   ]);
@@ -245,6 +266,7 @@ export function InternetDiagnosticsDashboard() {
     : null;
 
   const stabilityPercent = result?.stabilityScore ?? 0;
+  const sessionButtonLabel = getSessionButtonLabel(isRunning, isSessionActive);
 
   const explanations = useMemo<Explanation[]>(() => {
     if (!result) {
@@ -363,11 +385,11 @@ export function InternetDiagnosticsDashboard() {
         </p>
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="space-y-1 text-sm">
-            <span className="text-zinc-600 dark:text-zinc-300">Session length (seconds)</span>
+            <span className="text-zinc-600 dark:text-zinc-300">Session duration (seconds)</span>
             <input
               type="number"
-              min={15}
-              max={3600}
+              min={MIN_SESSION_DURATION_SECONDS}
+              max={MAX_SESSION_DURATION_SECONDS}
               value={sessionDurationSeconds}
               onChange={(event) =>
                 setSessionDurationSeconds(Number(event.target.value) || 0)
@@ -379,8 +401,8 @@ export function InternetDiagnosticsDashboard() {
             <span className="text-zinc-600 dark:text-zinc-300">Sample every (seconds)</span>
             <input
               type="number"
-              min={2}
-              max={600}
+              min={MIN_SAMPLE_INTERVAL_SECONDS}
+              max={MAX_SAMPLE_INTERVAL_SECONDS}
               value={sampleIntervalSeconds}
               onChange={(event) =>
                 setSampleIntervalSeconds(Number(event.target.value) || 0)
@@ -394,11 +416,7 @@ export function InternetDiagnosticsDashboard() {
             disabled={isRunning || isSessionActive}
             className="h-10 rounded-lg bg-black px-4 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-black dark:hover:bg-zinc-300"
           >
-            {isRunning && !isSessionActive
-              ? "Preparing..."
-              : isSessionActive
-                ? "Session running"
-                : "Start timed test"}
+            {sessionButtonLabel}
           </button>
           <button
             type="button"
