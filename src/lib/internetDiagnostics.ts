@@ -112,33 +112,77 @@ async function measureUploadMbps(sizeKB = 256): Promise<number> {
   return (uploadedBytes * 8) / elapsedSeconds / 1_000_000;
 }
 
-async function getPublicIp(): Promise<string | undefined> {
+interface IpApiResponse {
+  query?: string;
+  isp?: string;
+  city?: string;
+  country?: string;
+}
+
+async function getIpData(): Promise<{ publicIp?: string, isp?: string, location?: string }> {
   try {
-    const response = await diagnosticsClient.get<{ ip?: string }>(
-      "https://api.ipify.org",
+    // Note: ip-api.com is free for HTTP, but requires a pro plan for HTTPS.
+    // For local development, we'll try to use a more reliable HTTPS source if possible.
+    // Cloudflare's /cdn-cgi/trace or similar is often good for just IP.
+    // For full GeoIP, we'll stick to this but be aware of mixed content in production.
+    const response = await diagnosticsClient.get<IpApiResponse>(
+      "http://ip-api.com/json/",
       {
-        params: { format: "json" },
-      },
+        timeout: 5000,
+      }
     );
 
-    return response.data.ip;
+    const { query: publicIp, isp, city, country } = response.data;
+    const location = city && country ? `${city}, ${country}` : city || country;
+
+    return { publicIp, isp, location };
   } catch {
-    return undefined;
+    // Fallback if ip-api.com fails or is blocked
+    try {
+      const response = await diagnosticsClient.get<{ ip?: string }>(
+        "https://api.ipify.org?format=json"
+      );
+      return { publicIp: response.data.ip };
+    } catch {
+      return {};
+    }
   }
 }
 
+function calculateGrade(
+  latency: number,
+  jitter: number,
+  packetLoss: number
+): { grade: string; reason: string } {
+  if (packetLoss > 5) return { grade: "F", reason: "Significant packet loss detected." };
+  if (packetLoss > 2) return { grade: "D", reason: "Noticeable packet loss occurring." };
+
+  if (latency > 200) return { grade: "D", reason: "Very high latency." };
+  if (jitter > 50) return { grade: "D", reason: "Extremely unstable connection (high jitter)." };
+
+  if (latency > 100) return { grade: "C", reason: "Moderate latency." };
+  if (jitter > 30) return { grade: "C", reason: "Somewhat unstable connection." };
+
+  if (latency > 50) return { grade: "B", reason: "Acceptable latency." };
+  if (jitter > 15) return { grade: "B", reason: "Slight jitter detected." };
+
+  if (latency > 20 || jitter > 5) return { grade: "A", reason: "Great connection quality." };
+
+  return { grade: "A+", reason: "Excellent, rock-solid connection." };
+}
+
 function calculateStabilityScore(packetLossPercent: number, jitterMs: number) {
-  return clamp(100 - packetLossPercent * 2 - jitterMs * 0.5, 0, 100);
+  return clamp(100 - packetLossPercent * 5 - jitterMs * 0.8, 0, 100);
 }
 
 export async function runInternetDiagnostics(): Promise<InternetDiagnosticsResult> {
   const networkInfo = getNetworkInformation();
 
-  const [latencyMetrics, downloadMbps, uploadMbps, publicIp] = await Promise.all([
+  const [latencyMetrics, downloadMbps, uploadMbps, ipData] = await Promise.all([
     measureLatencyAndPacketLoss(),
     measureDownloadMbps(),
     measureUploadMbps(),
-    getPublicIp(),
+    getIpData(),
   ]);
 
   const stabilityScore = calculateStabilityScore(
@@ -146,9 +190,19 @@ export async function runInternetDiagnostics(): Promise<InternetDiagnosticsResul
     latencyMetrics.jitterMs,
   );
 
+  const { grade, reason: gradeReason } = calculateGrade(
+    latencyMetrics.latencyMs,
+    latencyMetrics.jitterMs,
+    latencyMetrics.packetLossPercent
+  );
+
   return {
     sampledAt: new Date().toISOString(),
-    publicIp,
+    publicIp: ipData.publicIp,
+    isp: ipData.isp,
+    location: ipData.location,
+    grade,
+    gradeReason,
     latencyMs: toTwoDecimals(latencyMetrics.latencyMs),
     jitterMs: toTwoDecimals(latencyMetrics.jitterMs),
     packetLossPercent: toTwoDecimals(latencyMetrics.packetLossPercent),

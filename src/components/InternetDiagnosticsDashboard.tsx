@@ -1,113 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Activity,
+  ArrowDown,
+  ArrowUp,
+  Clock,
+  Globe,
+  Info,
+  MapPin,
+  RefreshCw,
+  ShieldCheck,
+  Signal,
+  Zap,
+  Download,
+  Trash2,
+  Play,
+  Square
+} from "lucide-react";
 import { runInternetDiagnostics } from "@/lib/internetDiagnostics";
 import type { InternetDiagnosticsResult } from "@/types/internet";
-
-type Explanation = {
-  label: string;
-  layman: string;
-  technical: string;
-  value: string;
-};
+import { MetricCard } from "./MetricCard";
+import { HistoryChart } from "./HistoryChart";
+import { GradeDisplay } from "./GradeDisplay";
 
 const MAX_HISTORY_SAMPLES = 60;
 const MIN_SESSION_DURATION_SECONDS = 15;
 const MAX_SESSION_DURATION_SECONDS = 3600;
 const MIN_SAMPLE_INTERVAL_SECONDS = 2;
 const MAX_SAMPLE_INTERVAL_SECONDS = 600;
-
-function metricCard(
-  label: string,
-  value: string | number | undefined,
-  tone: "neutral" | "highlight" = "neutral",
-) {
-  return (
-    <div
-      className={`rounded-xl border p-4 shadow-sm ${
-        tone === "highlight"
-          ? "border-sky-300/70 bg-gradient-to-br from-sky-500/10 to-violet-500/10 dark:border-sky-500/40"
-          : "border-black/10 bg-white/70 backdrop-blur dark:border-white/10 dark:bg-zinc-950/60"
-      }`}
-    >
-      <dt className="text-sm text-zinc-500 dark:text-zinc-400">{label}</dt>
-      <dd className="mt-1 text-xl font-semibold">{value ?? "N/A"}</dd>
-    </div>
-  );
-}
-
-function chartPath(values: number[]) {
-  if (values.length < 2) {
-    return "";
-  }
-
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-
-  return values
-    .map((value, index) => {
-      const x = (index / (values.length - 1)) * 100;
-      const y = 100 - ((value - min) / range) * 100;
-      return `${x},${y}`;
-    })
-    .join(" ");
-}
-
-function lineChart(
-  title: string,
-  unit: string,
-  values: number[],
-  colorClassName: string,
-) {
-  const latest = values.at(-1);
-  const min = values.length ? Math.min(...values) : undefined;
-  const max = values.length ? Math.max(...values) : undefined;
-  const path = chartPath(values);
-
-  return (
-    <article className="rounded-xl border border-black/10 bg-white/70 p-4 shadow-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/60">
-      <header className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-medium text-zinc-600 dark:text-zinc-300">
-          {title}
-        </h3>
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          {latest !== undefined ? `${latest.toFixed(2)} ${unit}` : "Waiting..."}
-        </p>
-      </header>
-      <div className="h-28 rounded-lg bg-zinc-100/70 p-2 dark:bg-zinc-900/70">
-        {path ? (
-          <svg viewBox="0 0 100 100" className="h-full w-full" preserveAspectRatio="none">
-            <polyline
-              fill="none"
-              strokeWidth="2.5"
-              points={path}
-              className={colorClassName}
-            />
-          </svg>
-        ) : (
-          <div className="flex h-full items-center justify-center text-xs text-zinc-500 dark:text-zinc-400">
-            Need at least two samples.
-          </div>
-        )}
-      </div>
-      <footer className="mt-3 flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
-        <span>Min: {min !== undefined ? `${min.toFixed(2)} ${unit}` : "N/A"}</span>
-        <span>Max: {max !== undefined ? `${max.toFixed(2)} ${unit}` : "N/A"}</span>
-      </footer>
-    </article>
-  );
-}
-
-function getSessionButtonLabel(isRunning: boolean, isSessionActive: boolean) {
-  if (isRunning && !isSessionActive) {
-    return "Preparing...";
-  }
-  if (isSessionActive) {
-    return "Session running";
-  }
-  return "Start timed test";
-}
 
 export function InternetDiagnosticsDashboard() {
   const [result, setResult] = useState<InternetDiagnosticsResult | null>(null);
@@ -120,6 +42,8 @@ export function InternetDiagnosticsDashboard() {
   const [nextSampleAt, setNextSampleAt] = useState<number | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
+  const [isLoaded, setIsLoaded] = useState(false);
+
   const runningRef = useRef(false);
   const sessionActiveRef = useRef(false);
   const sessionEndRef = useRef(0);
@@ -127,10 +51,50 @@ export function InternetDiagnosticsDashboard() {
   const sampleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const runCheck = useCallback(async () => {
-    if (runningRef.current) {
-      return null;
+  // Load history from localStorage on mount
+  useEffect(() => {
+    const savedHistory = localStorage.getItem("net_diag_history");
+    let loadedHistory: InternetDiagnosticsResult[] = [];
+    let latestResult: InternetDiagnosticsResult | null = null;
+
+    if (savedHistory) {
+      try {
+        const parsed = JSON.parse(savedHistory);
+        if (Array.isArray(parsed)) {
+          loadedHistory = parsed;
+          if (parsed.length > 0) {
+            latestResult = parsed[parsed.length - 1];
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load history", e);
+      }
     }
+
+    // Move all state updates into a single microtask to avoid lint error
+    // and multiple renders in the same tick.
+    Promise.resolve().then(() => {
+      if (loadedHistory.length > 0) {
+        setHistory(loadedHistory);
+      }
+      if (latestResult) {
+        setResult(latestResult);
+      }
+      setIsLoaded(true);
+    });
+  }, []);
+
+  // Save history to localStorage
+  useEffect(() => {
+    if (isLoaded && history.length > 0) {
+      localStorage.setItem("net_diag_history", JSON.stringify(history));
+    } else if (isLoaded && history.length === 0) {
+      localStorage.removeItem("net_diag_history");
+    }
+  }, [history, isLoaded]);
+
+  const runCheck = useCallback(async () => {
+    if (runningRef.current) return null;
 
     runningRef.current = true;
     setIsRunning(true);
@@ -139,16 +103,13 @@ export function InternetDiagnosticsDashboard() {
     try {
       const output = await runInternetDiagnostics();
       setResult(output);
-      setHistory((current) => [
-        ...current.slice(-(MAX_HISTORY_SAMPLES - 1)),
-        output,
-      ]);
+      setHistory((current) => {
+        const updated = [...current.slice(-(MAX_HISTORY_SAMPLES - 1)), output];
+        return updated;
+      });
       return output;
     } catch (runError) {
-      const message =
-        runError instanceof Error
-          ? runError.message
-          : "Unable to complete diagnostics.";
+      const message = runError instanceof Error ? runError.message : "Unable to complete diagnostics.";
       setError(message);
       return null;
     } finally {
@@ -158,44 +119,27 @@ export function InternetDiagnosticsDashboard() {
   }, []);
 
   const clearTimers = useCallback(() => {
-    if (sampleTimerRef.current) {
-      clearTimeout(sampleTimerRef.current);
-      sampleTimerRef.current = null;
-    }
-    if (sessionTimerRef.current) {
-      clearTimeout(sessionTimerRef.current);
-      sessionTimerRef.current = null;
-    }
+    if (sampleTimerRef.current) clearTimeout(sampleTimerRef.current);
+    if (sessionTimerRef.current) clearTimeout(sessionTimerRef.current);
+    sampleTimerRef.current = null;
+    sessionTimerRef.current = null;
   }, []);
 
-  const stopSession = useCallback(
-    (message?: string) => {
-      sessionActiveRef.current = false;
-      clearTimers();
-      setIsSessionActive(false);
-      setSessionEndsAt(null);
-      setNextSampleAt(null);
-      if (message) {
-        setError(message);
-      }
-    },
-    [clearTimers],
-  );
+  const stopSession = useCallback((message?: string) => {
+    sessionActiveRef.current = false;
+    clearTimers();
+    setIsSessionActive(false);
+    setSessionEndsAt(null);
+    setNextSampleAt(null);
+    if (message) setError(message);
+  }, [clearTimers]);
 
   const startSession = useCallback(async () => {
-    const sanitizedDuration = Math.min(
-      Math.max(sessionDurationSeconds, MIN_SESSION_DURATION_SECONDS),
-      MAX_SESSION_DURATION_SECONDS,
-    );
-    const sanitizedInterval = Math.min(
-      Math.max(sampleIntervalSeconds, MIN_SAMPLE_INTERVAL_SECONDS),
-      MAX_SAMPLE_INTERVAL_SECONDS,
-    );
+    const sanitizedDuration = Math.min(Math.max(sessionDurationSeconds, MIN_SESSION_DURATION_SECONDS), MAX_SESSION_DURATION_SECONDS);
+    const sanitizedInterval = Math.min(Math.max(sampleIntervalSeconds, MIN_SAMPLE_INTERVAL_SECONDS), MAX_SAMPLE_INTERVAL_SECONDS);
 
     setSessionDurationSeconds(sanitizedDuration);
     setSampleIntervalSeconds(sanitizedInterval);
-    setHistory([]);
-    setResult(null);
     setError(null);
 
     const now = Date.now();
@@ -210,369 +154,377 @@ export function InternetDiagnosticsDashboard() {
 
     const scheduleSample = (delayMs: number) => {
       sampleTimerRef.current = setTimeout(async () => {
-        if (!sessionActiveRef.current) {
-          return;
-        }
-
+        if (!sessionActiveRef.current) return;
         await runCheck();
-
-        if (!sessionActiveRef.current) {
-          return;
-        }
+        if (!sessionActiveRef.current) return;
 
         const nextAt = Date.now() + sampleIntervalRef.current * 1000;
         if (nextAt < sessionEndRef.current) {
           setNextSampleAt(nextAt);
           scheduleSample(sampleIntervalRef.current * 1000);
-          return;
+        } else {
+          setNextSampleAt(null);
         }
-
-        setNextSampleAt(null);
       }, delayMs);
     };
 
-    const nextAt = Date.now() + sanitizedInterval * 1000;
-    if (nextAt < endAt) {
-      setNextSampleAt(nextAt);
+    const firstNextAt = Date.now() + sanitizedInterval * 1000;
+    if (firstNextAt < endAt) {
+      setNextSampleAt(firstNextAt);
       scheduleSample(sanitizedInterval * 1000);
     }
 
-    sessionTimerRef.current = setTimeout(() => {
-      stopSession();
-    }, sanitizedDuration * 1000);
-  }, [
-    runCheck,
-    sampleIntervalSeconds,
-    sessionDurationSeconds,
-    stopSession,
-  ]);
+    sessionTimerRef.current = setTimeout(() => stopSession(), sanitizedDuration * 1000);
+  }, [runCheck, sampleIntervalSeconds, sessionDurationSeconds, stopSession]);
+
+  const clearHistory = () => {
+    if (confirm("Are you sure you want to clear your test history?")) {
+      setHistory([]);
+      setResult(null);
+      localStorage.removeItem("net_diag_history");
+    }
+  };
+
+  const exportCSV = () => {
+    if (history.length === 0) return;
+
+    const headers = ["Timestamp", "IP", "ISP", "Location", "Grade", "Download (Mbps)", "Upload (Mbps)", "Latency (ms)", "Jitter (ms)", "Packet Loss (%)"];
+    const rows = history.map(h => [
+      h.sampledAt,
+      h.publicIp || "",
+      h.isp || "",
+      h.location || "",
+      h.grade,
+      h.downloadMbps,
+      h.uploadMbps,
+      h.latencyMs,
+      h.jitterMs,
+      h.packetLossPercent
+    ]);
+
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `network_diagnostics_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   useEffect(() => {
-    if (!isSessionActive) {
-      return;
-    }
-
+    if (!isSessionActive) return;
     const timer = setInterval(() => setClock(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [isSessionActive]);
 
   useEffect(() => () => clearTimers(), [clearTimers]);
 
-  const remainingSeconds = sessionEndsAt
-    ? Math.max(0, Math.ceil((sessionEndsAt - clock) / 1000))
-    : 0;
-  const nextSampleSeconds = nextSampleAt
-    ? Math.max(0, Math.ceil((nextSampleAt - clock) / 1000))
-    : null;
-
-  const stabilityPercent = result?.stabilityScore ?? 0;
-  const sessionButtonLabel = getSessionButtonLabel(isRunning, isSessionActive);
-
-  const explanations = useMemo<Explanation[]>(() => {
-    if (!result) {
-      return [];
-    }
-
-    return [
-      {
-        label: "Download speed",
-        layman: "How fast things like videos or web pages come to your device.",
-        technical:
-          "Throughput measured in megabits per second while downloading test data.",
-        value: `${result.downloadMbps} Mbps`,
-      },
-      {
-        label: "Upload speed",
-        layman: "How fast your device can send data like photos or video calls.",
-        technical:
-          "Throughput measured in megabits per second while uploading a binary payload.",
-        value: `${result.uploadMbps} Mbps`,
-      },
-      {
-        label: "Latency",
-        layman: "How quickly your internet responds after you ask for something.",
-        technical:
-          "Average request round-trip time in milliseconds across ping samples.",
-        value: `${result.latencyMs} ms`,
-      },
-      {
-        label: "Jitter",
-        layman:
-          "How steady your response time is. Lower jitter means smoother calls and gaming.",
-        technical:
-          "Average absolute difference between consecutive latency samples in milliseconds.",
-        value: `${result.jitterMs} ms`,
-      },
-      {
-        label: "Packet loss",
-        layman: "How much data gets lost on the way and must be resent.",
-        technical:
-          "Percentage of probe requests that failed during the sampling window.",
-        value: `${result.packetLossPercent}%`,
-      },
-      {
-        label: "Success rate",
-        layman: "How often your requests finish successfully.",
-        technical:
-          "Completed diagnostics ping requests divided by total requests as a percentage.",
-        value: `${result.requestSuccessRatePercent}%`,
-      },
-      {
-        label: "Stability score",
-        layman: "A quick health score of your internet reliability.",
-        technical:
-          "Derived score (0-100) penalizing high jitter and packet loss from measured samples.",
-        value: `${result.stabilityScore}/100`,
-      },
-      {
-        label: "Connection type",
-        layman: "A browser estimate of how strong/fast your current connection feels.",
-        technical:
-          "Navigator Network Information effectiveType classification from the browser.",
-        value: result.networkInfo.effectiveType ?? "N/A",
-      },
-      {
-        label: "Browser downlink",
-        layman: "Browser's own estimate of your available download capacity.",
-        technical:
-          "Network Information API downlink value in megabits per second.",
-        value:
-          result.networkInfo.downlinkMbps !== undefined
-            ? `${result.networkInfo.downlinkMbps} Mbps`
-            : "N/A",
-      },
-      {
-        label: "Browser RTT",
-        layman: "Browser's estimate of round trip response delay.",
-        technical:
-          "Network Information API rtt estimate in milliseconds from client environment.",
-        value:
-          result.networkInfo.rttMs !== undefined
-            ? `${result.networkInfo.rttMs} ms`
-            : "N/A",
-      },
-      {
-        label: "Data saver",
-        layman: "If enabled, apps may use less data to reduce usage.",
-        technical:
-          "Network Information API saveData preference exposed by the browser.",
-        value:
-          result.networkInfo.saveData === undefined
-            ? "N/A"
-            : result.networkInfo.saveData
-              ? "Enabled"
-              : "Disabled",
-      },
-      {
-        label: "Public IP",
-        layman: "The internet-facing address your network appears to use.",
-        technical:
-          "External IPv4/IPv6 address fetched from an outbound IP reflection endpoint.",
-        value: result.publicIp ?? "N/A",
-      },
-    ];
-  }, [result]);
+  const remainingSeconds = sessionEndsAt ? Math.max(0, Math.ceil((sessionEndsAt - clock) / 1000)) : 0;
+  const nextSampleSeconds = nextSampleAt ? Math.max(0, Math.ceil((nextSampleAt - clock) / 1000)) : null;
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-6 py-8">
-      <section className="rounded-2xl border border-black/10 bg-gradient-to-br from-sky-500/20 via-white/60 to-violet-500/20 p-6 shadow-sm dark:border-white/10 dark:from-sky-500/20 dark:via-zinc-950/70 dark:to-violet-500/20">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Internet Stability Command Center
-        </h1>
-        <p className="mt-2 max-w-3xl text-sm text-zinc-700 dark:text-zinc-300">
-          Run timed diagnostics sessions, monitor live network behavior, and review
-          each metric with plain-language and technical explanations.
-        </p>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <label className="space-y-1 text-sm">
-            <span className="text-zinc-600 dark:text-zinc-300">Session duration (seconds)</span>
-            <input
-              type="number"
-              min={MIN_SESSION_DURATION_SECONDS}
-              max={MAX_SESSION_DURATION_SECONDS}
-              value={sessionDurationSeconds}
-              onChange={(event) =>
-                setSessionDurationSeconds(Number(event.target.value) || 0)
-              }
-              className="h-10 w-full rounded-lg border border-black/10 bg-white px-3 dark:border-white/10 dark:bg-zinc-900"
-            />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span className="text-zinc-600 dark:text-zinc-300">Sample every (seconds)</span>
-            <input
-              type="number"
-              min={MIN_SAMPLE_INTERVAL_SECONDS}
-              max={MAX_SAMPLE_INTERVAL_SECONDS}
-              value={sampleIntervalSeconds}
-              onChange={(event) =>
-                setSampleIntervalSeconds(Number(event.target.value) || 0)
-              }
-              className="h-10 w-full rounded-lg border border-black/10 bg-white px-3 dark:border-white/10 dark:bg-zinc-900"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={startSession}
-            disabled={isRunning || isSessionActive}
-            className="h-10 rounded-lg bg-black px-4 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-white dark:text-black dark:hover:bg-zinc-300"
-          >
-            {sessionButtonLabel}
-          </button>
-          <button
-            type="button"
-            onClick={() => stopSession()}
-            disabled={!isSessionActive}
-            className="h-10 rounded-lg border border-black/20 px-4 text-sm font-medium transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/20 dark:hover:bg-white/10"
-          >
-            Stop session
-          </button>
-        </div>
-        <div className="mt-4 flex flex-wrap gap-4 text-sm text-zinc-600 dark:text-zinc-300">
-          <span>Status: {isSessionActive ? "Active" : "Idle"}</span>
-          <span>Time left: {isSessionActive ? `${remainingSeconds}s` : "-"}</span>
-          <span>
-            Next sample in:{" "}
-            {isSessionActive && nextSampleSeconds !== null ? `${nextSampleSeconds}s` : "-"}
-          </span>
-          <button
-            type="button"
-            onClick={runCheck}
-            disabled={isRunning}
-            className="font-medium text-sky-700 underline underline-offset-2 transition hover:text-sky-500 disabled:opacity-60 dark:text-sky-300"
-          >
-            {isRunning ? "Running..." : "Run single sample now"}
-          </button>
-        </div>
-      </section>
+    <main className="min-h-screen bg-zinc-50 text-zinc-900 selection:bg-sky-500/30 dark:bg-zinc-950 dark:text-zinc-100 transition-colors duration-500 pb-20">
+      {/* Header / Hero Section */}
+      <div className="relative overflow-hidden bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 px-6 py-12 md:py-20 mb-8">
+        <div className="absolute inset-0 bg-grid-zinc-900/[0.02] dark:bg-grid-white/[0.02]" />
+        <div className="absolute inset-0 bg-gradient-to-tr from-sky-500/10 via-transparent to-violet-500/10" />
 
-      {error ? (
-        <p className="rounded-md border border-red-400/40 bg-red-50 p-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-950/40 dark:text-red-300">
-          {error}
-        </p>
-      ) : null}
-
-      {result ? (
-        <section className="space-y-6">
-          <section className="rounded-xl border border-black/10 bg-white/70 p-5 shadow-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/60">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Live Stability Snapshot</h2>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                Last sampled at {new Date(result.sampledAt).toLocaleTimeString()}.
+        <div className="relative mx-auto max-w-6xl">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col md:flex-row md:items-end justify-between gap-6"
+          >
+            <div className="max-w-2xl">
+              <div className="inline-flex items-center gap-2 rounded-full bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-600 dark:text-sky-400 mb-4">
+                <Activity size={14} />
+                Network Intelligence
+              </div>
+              <h1 className="text-4xl md:text-5xl font-black tracking-tight mb-4">
+                Internet Stability <span className="bg-gradient-to-r from-sky-500 to-violet-500 bg-clip-text text-transparent">Command Center</span>
+              </h1>
+              <p className="text-lg text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                Professional-grade network diagnostics with real-time stability monitoring,
+                intelligent grading, and granular performance metrics.
               </p>
             </div>
-            <div className="mt-4 h-3 rounded-full bg-zinc-200 dark:bg-zinc-800">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-sky-500 to-violet-500 transition-all duration-500"
-                style={{ width: `${stabilityPercent}%` }}
-              />
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={runCheck}
+                disabled={isRunning}
+                className="inline-flex h-12 items-center gap-2 rounded-xl bg-zinc-900 px-6 text-sm font-bold text-white transition-all hover:bg-zinc-800 active:scale-95 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              >
+                {isRunning ? <RefreshCw className="animate-spin" size={18} /> : <Zap size={18} />}
+                Quick Sample
+              </button>
+              <button
+                onClick={isSessionActive ? () => stopSession() : startSession}
+                className={`inline-flex h-12 items-center gap-2 rounded-xl border-2 px-6 text-sm font-bold transition-all active:scale-95 ${
+                  isSessionActive
+                    ? "border-rose-500/20 bg-rose-500/10 text-rose-500 hover:bg-rose-500/20"
+                    : "border-sky-500/20 bg-sky-500/10 text-sky-500 hover:bg-sky-500/20"
+                }`}
+              >
+                {isSessionActive ? <Square size={18} /> : <Play size={18} />}
+                {isSessionActive ? "Stop Session" : "Start Timed Test"}
+              </button>
             </div>
-            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
-              Stability score: <span className="font-semibold">{result.stabilityScore}/100</span>
-            </p>
-          </section>
+          </motion.div>
 
-          <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {metricCard("Public IP", result.publicIp)}
-            {metricCard("Download speed", `${result.downloadMbps} Mbps`, "highlight")}
-            {metricCard("Upload speed", `${result.uploadMbps} Mbps`, "highlight")}
-            {metricCard("Latency", `${result.latencyMs} ms`)}
-            {metricCard("Jitter", `${result.jitterMs} ms`)}
-            {metricCard("Packet loss", `${result.packetLossPercent}%`)}
-            {metricCard("Success rate", `${result.requestSuccessRatePercent}%`)}
-            {metricCard("Stability score", `${result.stabilityScore}/100`, "highlight")}
-            {metricCard("Connection type", result.networkInfo.effectiveType)}
-            {metricCard(
-              "Browser downlink",
-              result.networkInfo.downlinkMbps !== undefined
-                ? `${result.networkInfo.downlinkMbps} Mbps`
-                : undefined,
-            )}
-            {metricCard(
-              "Browser RTT",
-              result.networkInfo.rttMs !== undefined
-                ? `${result.networkInfo.rttMs} ms`
-                : undefined,
-            )}
-            {metricCard(
-              "Data saver enabled",
-              result.networkInfo.saveData === undefined
-                ? undefined
-                : result.networkInfo.saveData
-                  ? "Yes"
-                  : "No",
-            )}
-          </dl>
-
-          <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-            {lineChart(
-              "Download speed",
-              "Mbps",
-              history.map((item) => item.downloadMbps),
-              "stroke-emerald-500",
-            )}
-            {lineChart(
-              "Upload speed",
-              "Mbps",
-              history.map((item) => item.uploadMbps),
-              "stroke-sky-500",
-            )}
-            {lineChart(
-              "Latency",
-              "ms",
-              history.map((item) => item.latencyMs),
-              "stroke-amber-500",
-            )}
-            {lineChart(
-              "Jitter",
-              "ms",
-              history.map((item) => item.jitterMs),
-              "stroke-violet-500",
-            )}
-            {lineChart(
-              "Packet loss",
-              "%",
-              history.map((item) => item.packetLossPercent),
-              "stroke-rose-500",
-            )}
-            {lineChart(
-              "Stability score",
-              "pts",
-              history.map((item) => item.stabilityScore),
-              "stroke-cyan-500",
-            )}
-          </section>
-
-          <section className="rounded-xl border border-black/10 bg-white/70 p-5 shadow-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/60">
-            <h2 className="text-lg font-semibold">Metric Meaning Guide</h2>
-            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
-              Plain-language and technical context for every parameter shown above.
-            </p>
-            <div className="mt-4 grid gap-3">
-              {explanations.map((item) => (
-                <article
-                  key={item.label}
-                  className="rounded-lg border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-zinc-900/70"
-                >
-                  <h3 className="text-base font-semibold">{item.label}</h3>
-                  <p className="mt-1 text-sm">
-                    <span className="font-medium">Current:</span> {item.value}
-                  </p>
-                  <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
-                    <span className="font-semibold">Layman:</span> {item.layman}
-                  </p>
-                  <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-300">
-                    <span className="font-semibold">Technical:</span> {item.technical}
-                  </p>
-                </article>
-              ))}
+          {/* Session Controls / Settings Overlay */}
+          <div className="mt-12 grid grid-cols-1 md:grid-cols-4 gap-6 items-center p-6 rounded-2xl bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-800">
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Duration</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  value={sessionDurationSeconds}
+                  onChange={(e) => setSessionDurationSeconds(Number(e.target.value))}
+                  className="w-full h-10 bg-transparent text-sm font-bold focus:outline-none"
+                />
+                <span className="absolute right-0 top-1/2 -translate-y-1/2 text-xs text-zinc-400">sec</span>
+              </div>
             </div>
-          </section>
-        </section>
-      ) : (
-        <section className="rounded-xl border border-black/10 bg-white/70 p-6 text-sm text-zinc-600 shadow-sm backdrop-blur dark:border-white/10 dark:bg-zinc-950/60 dark:text-zinc-300">
-          Start a session or run a single sample to populate live charts and metric explanations.
-        </section>
-      )}
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Interval</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  value={sampleIntervalSeconds}
+                  onChange={(e) => setSampleIntervalSeconds(Number(e.target.value))}
+                  className="w-full h-10 bg-transparent text-sm font-bold focus:outline-none"
+                />
+                <span className="absolute right-0 top-1/2 -translate-y-1/2 text-xs text-zinc-400">sec</span>
+              </div>
+            </div>
+            <div className="col-span-1 md:col-span-2 flex items-center justify-between pl-4 border-l border-zinc-200 dark:border-zinc-800">
+              <div className="flex gap-8">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Time Left</div>
+                  <div className="text-xl font-black font-mono">{isSessionActive ? `${remainingSeconds}s` : "--"}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Next Sample</div>
+                  <div className="text-xl font-black font-mono text-sky-500">{isSessionActive && nextSampleSeconds !== null ? `${nextSampleSeconds}s` : "--"}</div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                 <button onClick={exportCSV} title="Export CSV" className="p-2 rounded-lg hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors">
+                  <Download size={20} />
+                 </button>
+                 <button onClick={clearHistory} title="Clear History" className="p-2 rounded-lg hover:bg-rose-500/10 text-rose-500 transition-colors">
+                  <Trash2 size={20} />
+                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto max-w-6xl px-6">
+        <AnimatePresence mode="wait">
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-8 overflow-hidden"
+            >
+              <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 p-4 text-sm font-medium text-rose-500 flex items-center gap-3">
+                <div className="h-2 w-2 rounded-full bg-rose-500 animate-pulse" />
+                {error}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {result ? (
+          <div className="space-y-10">
+            {/* Top Row: Grade and Key Metrics */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
+              <div className="lg:col-span-4">
+                <GradeDisplay
+                  grade={result.grade}
+                  reason={result.gradeReason}
+                  stabilityScore={result.stabilityScore}
+                />
+              </div>
+              <div className="lg:col-span-8 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <MetricCard
+                  label="Download Speed"
+                  value={`${result.downloadMbps} Mbps`}
+                  icon={<ArrowDown className="text-emerald-500" />}
+                  tone="highlight"
+                  description="Real-time data throughput"
+                />
+                <MetricCard
+                  label="Upload Speed"
+                  value={`${result.uploadMbps} Mbps`}
+                  icon={<ArrowUp className="text-sky-500" />}
+                  tone="highlight"
+                  description="Upstream data capacity"
+                />
+                <MetricCard
+                  label="Network Latency"
+                  value={`${result.latencyMs} ms`}
+                  icon={<Clock className="text-amber-500" />}
+                  description="Round-trip response time"
+                />
+                <MetricCard
+                  label="Jitter (Variance)"
+                  value={`${result.jitterMs} ms`}
+                  icon={<Signal className="text-violet-500" />}
+                  description="Delay consistency over time"
+                />
+              </div>
+            </div>
+
+            {/* Middle Row: Network Details & Secondary Metrics */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="col-span-1 rounded-2xl border border-black/5 bg-zinc-100/50 p-6 dark:border-white/5 dark:bg-zinc-900/50">
+                <h3 className="flex items-center gap-2 text-sm font-bold uppercase tracking-widest text-zinc-500 mb-6">
+                  <Globe size={14} /> Connection Identity
+                </h3>
+                <div className="space-y-4">
+                   <div className="flex justify-between items-center">
+                    <span className="text-xs text-zinc-500">Public IP</span>
+                    <span className="font-mono text-sm font-bold">{result.publicIp || "N/A"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs text-zinc-500">Service Provider</span>
+                    <span className="text-sm font-bold text-right">{result.isp || "N/A"}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs text-zinc-500">Location</span>
+                    <span className="flex items-center gap-1 text-sm font-bold">
+                      <MapPin size={12} className="text-sky-500" />
+                      {result.location || "N/A"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <MetricCard
+                  label="Packet Loss"
+                  value={`${result.packetLossPercent}%`}
+                  tone={result.packetLossPercent > 1 ? "danger" : "success"}
+                />
+                <MetricCard
+                  label="Success Rate"
+                  value={`${result.requestSuccessRatePercent}%`}
+                  tone={result.requestSuccessRatePercent < 95 ? "danger" : "success"}
+                />
+                <MetricCard
+                  label="Connection Type"
+                  value={result.networkInfo.effectiveType?.toUpperCase() || "N/A"}
+                />
+                <MetricCard
+                  label="Browser RTT"
+                  value={result.networkInfo.rttMs ? `${result.networkInfo.rttMs} ms` : "N/A"}
+                />
+                <MetricCard
+                  label="Browser Downlink"
+                  value={result.networkInfo.downlinkMbps ? `${result.networkInfo.downlinkMbps} Mbps` : "N/A"}
+                />
+                <MetricCard
+                  label="Data Saver"
+                  value={result.networkInfo.saveData ? "Enabled" : "Disabled"}
+                />
+              </div>
+            </div>
+
+            {/* History Charts */}
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-2xl font-black">Performance Trends</h2>
+                <div className="h-px flex-1 mx-6 bg-zinc-200 dark:bg-zinc-800" />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                <HistoryChart
+                  title="Download Speed"
+                  data={history.map(h => ({ value: h.downloadMbps, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="Mbps"
+                  color="#10b981"
+                />
+                <HistoryChart
+                  title="Upload Speed"
+                  data={history.map(h => ({ value: h.uploadMbps, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="Mbps"
+                  color="#0ea5e9"
+                />
+                <HistoryChart
+                  title="Latency"
+                  data={history.map(h => ({ value: h.latencyMs, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="ms"
+                  color="#f59e0b"
+                />
+                <HistoryChart
+                  title="Jitter"
+                  data={history.map(h => ({ value: h.jitterMs, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="ms"
+                  color="#8b5cf6"
+                />
+                <HistoryChart
+                  title="Stability Score"
+                  data={history.map(h => ({ value: h.stabilityScore, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="pts"
+                  color="#06b6d4"
+                />
+                <HistoryChart
+                  title="Packet Loss"
+                  data={history.map(h => ({ value: h.packetLossPercent, time: new Date(h.sampledAt).toLocaleTimeString() }))}
+                  unit="%"
+                  color="#f43f5e"
+                />
+              </div>
+            </div>
+
+            {/* Methodology / Explanation */}
+            <section className="rounded-3xl bg-zinc-900 text-white p-8 md:p-12 dark:bg-white dark:text-zinc-900 shadow-2xl overflow-hidden relative">
+              <div className="absolute top-0 right-0 p-12 opacity-5">
+                <ShieldCheck size={200} />
+              </div>
+              <div className="relative max-w-3xl">
+                <h2 className="text-3xl font-black mb-6 flex items-center gap-3">
+                  <Info size={32} className="text-sky-500" />
+                  Diagnostic Methodology
+                </h2>
+                <div className="grid gap-8 md:grid-cols-2">
+                  <div className="space-y-4">
+                    <h3 className="font-bold text-lg border-b border-white/10 dark:border-zinc-900/10 pb-2">Technical Analysis</h3>
+                    <p className="text-sm text-zinc-400 dark:text-zinc-500 leading-relaxed">
+                      Our system performs sub-millisecond precision pings to multiple endpoints to calculate average latency and jitter.
+                      Download and upload speeds are measured through chunked binary data transfers to ensure throughput accuracy.
+                    </p>
+                  </div>
+                  <div className="space-y-4">
+                    <h3 className="font-bold text-lg border-b border-white/10 dark:border-zinc-900/10 pb-2">Stability Grading</h3>
+                    <p className="text-sm text-zinc-400 dark:text-zinc-500 leading-relaxed">
+                      We use a proprietary algorithm that penalizes packet loss and jitter variance heavily, as these are the primary
+                      culprits for poor experience in real-time applications like video conferencing and gaming.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-20 text-center border-2 border-dashed border-zinc-200 dark:border-zinc-800 rounded-3xl">
+            <div className="h-20 w-20 rounded-full bg-zinc-100 dark:bg-zinc-900 flex items-center justify-center mb-6">
+              <Activity className="text-zinc-400" size={40} />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">No Diagnostic Data</h2>
+            <p className="text-zinc-500 dark:text-zinc-400 max-w-md">
+              Start a diagnostics session or run a quick sample to see your network&apos;s real-time stability and performance.
+            </p>
+          </div>
+        )}
+      </div>
     </main>
   );
 }

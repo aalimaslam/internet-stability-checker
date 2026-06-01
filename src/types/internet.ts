@@ -8,6 +8,10 @@ export interface NetworkInformationSnapshot {
 export interface InternetDiagnosticsResult {
   sampledAt: string;
   publicIp?: string;
+  isp?: string;
+  location?: string;
+  grade: string;
+  gradeReason: string;
   latencyMs: number;
   jitterMs: number;
   packetLossPercent: number;
